@@ -1,0 +1,7 @@
+src/
+test/
+tests/
+__tests__/
+coverage/
+spec/
+vitest.config.ts
