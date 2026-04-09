@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { registerScanCommand } from "./commands/scan.js";
 import { registerAuthCommand } from "./commands/auth.js";
+import { registerCiInitCommand } from "./commands/ci-init.js";
 import pkg from "../package.json" with { type: "json" };
 export const DEFAULT_BACKEND_URL = "https://getfortifai.com";
 
@@ -15,5 +16,6 @@ program
 
 registerScanCommand(program);
 registerAuthCommand(program);
+registerCiInitCommand(program);
 
 program.parse(process.argv);

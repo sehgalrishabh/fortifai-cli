@@ -1,8 +1,19 @@
 import { DEFAULT_BACKEND_URL } from "../index.js";
 
+export interface SignalCounts {
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  total: number;
+}
+
 export interface UploadResult {
   success: boolean;
   dashboardUrl?: string;
+  verdict?: "PASS" | "WARN" | "FAIL" | null | undefined;
+  riskScore?: number | null | undefined;
+  signalCounts?: SignalCounts | undefined;
   error?: string;
 }
 
@@ -39,10 +50,18 @@ export async function uploadScanLog(
       };
     }
 
-    const data = (await response.json()) as { dashboardUrl?: string };
+    const data = (await response.json()) as {
+      dashboardUrl?: string;
+      verdict?: "PASS" | "WARN" | "FAIL" | null;
+      riskScore?: number | null;
+      signalCounts?: SignalCounts;
+    };
     return {
       success: true,
       dashboardUrl: data.dashboardUrl ?? `${DEFAULT_BACKEND_URL}/dashboard`,
+      verdict: data.verdict,
+      riskScore: data.riskScore,
+      signalCounts: data.signalCounts,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

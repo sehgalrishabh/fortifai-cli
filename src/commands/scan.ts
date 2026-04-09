@@ -42,10 +42,24 @@ function buildProgressBar(percent: number): string {
   return `${"#".repeat(completed)}${"-".repeat(20 - completed)}`;
 }
 
+type FailOnSeverity = "critical" | "high" | "medium" | "low";
+
+const SEVERITY_ORDER: FailOnSeverity[] = ["critical", "high", "medium", "low"];
+
+function shouldFail(
+  failOn: FailOnSeverity,
+  counts: { critical: number; high: number; medium: number; low: number },
+): boolean {
+  const idx = SEVERITY_ORDER.indexOf(failOn);
+  const relevant = SEVERITY_ORDER.slice(0, idx + 1);
+  return relevant.some((s) => counts[s] > 0);
+}
+
 interface ScanCommandOptions {
   config?: string;
   concurrency?: number;
   rateLimit?: number;
+  failOn?: FailOnSeverity;
 }
 
 export function registerScanCommand(program: Command): void {
@@ -62,6 +76,10 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--rate-limit <number>",
       "Max request starts per second (0 disables throttling)",
+    )
+    .option(
+      "--fail-on <severity>",
+      "Exit with code 1 if findings at or above this severity are found (critical|high|medium|low)",
     )
     .action(async (opts: ScanCommandOptions) => {
       const scanId = generateScanId();
@@ -93,7 +111,7 @@ export function registerScanCommand(program: Command): void {
           errorMessage: message,
         });
         console.error(`x Config error: ${message}`);
-        process.exit(1);
+        process.exit(2);
       }
       console.log(`   Agents configured: ${config.agents.length}`);
 
@@ -111,7 +129,7 @@ export function registerScanCommand(program: Command): void {
           errorMessage: message,
         });
         console.error(`x Payload error: ${message}`);
-        process.exit(1);
+        process.exit(2);
       }
       console.log(`   Payloads loaded: ${payloads.length}`);
 
@@ -128,11 +146,19 @@ export function registerScanCommand(program: Command): void {
 
       if (!Number.isInteger(concurrency) || concurrency < 1) {
         console.error("x Invalid concurrency. Use an integer >= 1.");
-        process.exit(1);
+        process.exit(2);
       }
       if (!Number.isFinite(rateLimitPerSecond) || rateLimitPerSecond < 0) {
         console.error("x Invalid rate limit. Use a number >= 0.");
-        process.exit(1);
+        process.exit(2);
+      }
+
+      const failOn = opts.failOn?.toLowerCase() as FailOnSeverity | undefined;
+      if (failOn && !SEVERITY_ORDER.includes(failOn)) {
+        console.error(
+          `x Invalid --fail-on value "${failOn}". Use: critical, high, medium, or low.`,
+        );
+        process.exit(2);
       }
 
       const totalAttacks = config.agents.length * payloads.length;
@@ -151,7 +177,12 @@ export function registerScanCommand(program: Command): void {
         payloadCount: payloads.length,
       });
 
-      log.writePhase("execution", "running", "execution", "Attack execution started");
+      log.writePhase(
+        "execution",
+        "running",
+        "execution",
+        "Attack execution started",
+      );
 
       // Notify dashboard that scan has started (non-blocking)
       if (config.apiKey) {
@@ -185,16 +216,24 @@ export function registerScanCommand(program: Command): void {
               payloadId: result.payloadId,
               campaign: result.category,
               payloadText: result.payload,
-              ...(payload?.severity !== undefined ? { payloadSeverity: payload.severity } : {}),
-              ...(payload?.attack_vector !== undefined ? { payloadAttackVector: payload.attack_vector } : {}),
-              ...(payload?.attack_technique !== undefined ? { payloadAttackTechnique: payload.attack_technique } : {}),
+              ...(payload?.severity !== undefined
+                ? { payloadSeverity: payload.severity }
+                : {}),
+              ...(payload?.attack_vector !== undefined
+                ? { payloadAttackVector: payload.attack_vector }
+                : {}),
+              ...(payload?.attack_technique !== undefined
+                ? { payloadAttackTechnique: payload.attack_technique }
+                : {}),
               requestEndpoint: result.request.endpoint,
               requestMethod: result.request.method,
               requestBody: result.request.body,
               responseStatus: result.response.status,
               responseLatencyMs: result.response.latencyMs,
               responseBody: result.response.body,
-              ...(result.response.error !== undefined ? { responseError: result.response.error } : {}),
+              ...(result.response.error !== undefined
+                ? { responseError: result.response.error }
+                : {}),
             });
 
             // Console progress
@@ -206,7 +245,10 @@ export function registerScanCommand(program: Command): void {
             );
 
             // Checkpoint every 10%
-            if (pct - lastCheckpointPct >= CHECKPOINT_INTERVAL_PCT || pct === 100) {
+            if (
+              pct - lastCheckpointPct >= CHECKPOINT_INTERVAL_PCT ||
+              pct === 100
+            ) {
               lastCheckpointPct = pct;
               const currentOutcomes = buildRequestOutcomes(scanResults);
               const currentLatency = buildLatencySummary(scanResults);
@@ -238,7 +280,7 @@ export function registerScanCommand(program: Command): void {
           );
         }
         console.error(`\nx Execution error: ${message}`);
-        process.exit(1);
+        process.exit(2);
       }
 
       const scanCompletedAt = new Date().toISOString();
@@ -253,10 +295,20 @@ export function registerScanCommand(program: Command): void {
         `\n   Complete - Success: ${outcomes.successful}  Timeout: ${outcomes.timedOut}  Error: ${outcomes.transportErrors}`,
       );
 
-      log.writePhase("execution", "completed", "execution", "Attack execution completed");
+      log.writePhase(
+        "execution",
+        "completed",
+        "execution",
+        "Attack execution completed",
+      );
 
       // Final checkpoint with complete stats
-      log.writeCheckpoint({ completedAttempts: totalAttacks, totalAttempts: totalAttacks, requestOutcomes: outcomes, latency });
+      log.writeCheckpoint({
+        completedAttempts: totalAttacks,
+        totalAttempts: totalAttacks,
+        requestOutcomes: outcomes,
+        latency,
+      });
 
       // Collect per-agent stats for scan.final
       const agentEndpoints: Record<string, string> = {};
@@ -284,7 +336,7 @@ export function registerScanCommand(program: Command): void {
       });
 
       // Console summary
-      printSummary(scanResults, [], scanId);
+      printSummary(scanResults, scanId);
       console.log(
         "  Note: Security evaluation runs on the dashboard after upload.",
       );
@@ -292,17 +344,59 @@ export function registerScanCommand(program: Command): void {
       // ── Upload NDJSON log to dashboard ────────────────────────────────────────
       if (config.apiKey) {
         console.log("\n-> Uploading scan log to dashboard...");
-        const uploadResult = await uploadScanLog(scanId, log.getLog(), config.apiKey);
+        const uploadResult = await uploadScanLog(
+          scanId,
+          log.getLog(),
+          config.apiKey,
+        );
 
         if (uploadResult.success) {
           console.log(
             `   Dashboard: ${uploadResult.dashboardUrl ?? "https://getfortifai.com/dashboard"}`,
           );
+
+          // Print evaluation results returned by the server
+          if (uploadResult.verdict) {
+            const { verdict, riskScore, signalCounts } = uploadResult;
+            const line = "=".repeat(72);
+            console.log(`\n${line}`);
+            console.log("  Security Evaluation Results");
+            console.log(line);
+            console.log(`  Verdict      : ${verdict}`);
+            if (riskScore != null) console.log(`  Risk Score   : ${riskScore}`);
+            if (signalCounts) {
+              console.log(
+                `  Findings     : CRITICAL ${signalCounts.critical}  HIGH ${signalCounts.high}  MEDIUM ${signalCounts.medium}  LOW ${signalCounts.low}`,
+              );
+            }
+            console.log(line);
+            console.log();
+          }
+
+          // ── --fail-on exit gate ─────────────────────────────────────────────
+          if (failOn && uploadResult.signalCounts) {
+            const counts = uploadResult.signalCounts;
+            if (shouldFail(failOn, counts)) {
+              console.error(
+                `x --fail-on ${failOn}: findings detected (CRITICAL ${counts.critical}, HIGH ${counts.high}, MEDIUM ${counts.medium}, LOW ${counts.low})`,
+              );
+              process.exit(1);
+            } else {
+              console.log(
+                `✓ --fail-on ${failOn}: no findings at or above threshold.`,
+              );
+            }
+          }
         } else {
           console.warn(`   Upload failed: ${uploadResult.error}`);
         }
       } else {
         console.warn("\n   No API key configured — skipping dashboard upload.");
+        if (failOn) {
+          console.warn(
+            "   --fail-on requires an API key to retrieve evaluation results.",
+          );
+        }
       }
     });
 }
